@@ -24,12 +24,25 @@ touch "$MAP_FILE"
 echo "--- Stable ASA Tracker Started: $(date) ---" > tracker_debug.log
 
 # ========================================================
+# --- DATA EXTRACTION ---
+# Pterodactyl passes these from your Variables tab. 
+# We check the most common variable names used in ASA eggs.
+# ========================================================
+get_server_info() {
+    # Find Server Name (Checks SESSION_NAME first, then SERVER_NAME)
+    CLEAN_SNAME=$(echo "${SESSION_NAME:-${SERVER_NAME:-ASA Server}}" | tr -d '"' | tr -dc '[:print:]')
+    
+    # Find Map Name (Checks SERVER_MAP first, then MAP)
+    CLEAN_MAP=$(echo "${SERVER_MAP:-${MAP:-TheIsland_WP}}" | tr -d '"' | tr -dc '[:print:]')
+}
+
+# ========================================================
 # --- SHUTDOWN INTERCEPTOR ---
 # ========================================================
 send_offline() {
     echo "[SHUTDOWN] Kill signal received! Updating Discord..." >> tracker_debug.log
     CUR_TIME=$(date +'%T')
-    CLEAN_SNAME=$(echo "${SERVER_NAME:-ASA Server}" | tr -d '"' | tr -dc '[:print:]')
+    get_server_info
     
     cat <<EOF > payload.json
 {
@@ -40,7 +53,8 @@ send_offline() {
     "color": 15548997, 
     "fields": [
       {"name": "Server Name", "value": "$CLEAN_SNAME", "inline": false},
-      {"name": "Status", "value": "🔴 Offline / Restarting", "inline": true},
+      {"name": "Map", "value": "$CLEAN_MAP", "inline": true},
+      {"name": "Status", "value": "🔴 Offline", "inline": true},
       {"name": "Current Players", "value": "0", "inline": true},
       {"name": "Online Players", "value": "\`\`\`\nServer is currently offline\n\`\`\`", "inline": false}
     ],
@@ -63,7 +77,6 @@ trap send_offline SIGTERM SIGINT
 tail -F -n 0 "$LOG_FILE" 2>/dev/null | while read -r line; do
 
     # Trigger #1: Player Joins
-    # ASA UE5 Log: LogNet: Join succeeded: PlayerName
     if [[ "$line" == *"Join succeeded:"* ]]; then
         NAME=$(echo "$line" | sed 's/.*Join succeeded: //' | tr -d '\r\n' | tr -d '"' | tr -d "'" | xargs)
         if [ -n "$NAME" ] && ! grep -qx "$NAME" "$LIST_FILE"; then
@@ -72,71 +85,10 @@ tail -F -n 0 "$LOG_FILE" 2>/dev/null | while read -r line; do
     fi
 
     # Trigger #2: Player Leaves
-    # ASA often logs connection closures via NetConnection
     if [[ "$line" == *"CloseBunch"* ]] || [[ "$line" == *"LogNet: UChannel::Close"* ]]; then
-        # Because ASA leave logs don't always print the clean name, 
-        # we trigger a list rebuild or pop the last left if we can parse it.
-        # For a simple setup, if player count drops, we update the list.
-        # This regex looks for Account ID disconnects if Admin Logging is on:
         if [[ "$line" == *"Account was disconnected"* ]]; then
             LEAVE_ID=$(echo "$line" | sed -n 's/.*AccountId \([A-F0-9]*\)\..*/\1/p')
-            # (Standard mapping cleanup goes here if you track SteamIDs)
         fi
         
         # Fallback for generic disconnects: if we only have 1 player, clear the list
-        ONLINE_COUNT=$(grep -c "[^[:space:]]" "$LIST_FILE")
-        if [ "$ONLINE_COUNT" -le 1 ]; then > "$LIST_FILE"; fi
-    fi
-done &
-
-# --- Main Discord Loop ---
-while true; do
-    CUR_TIME=$(date +'%T')
-    CLEAN_SNAME=$(echo "${SERVER_NAME:-ASA Server}" | tr -d '"' | tr -dc '[:print:]')
-
-    # NORMAL ONLINE LOOP
-    PLAYERS=$(grep -c "[^[:space:]]" "$LIST_FILE" | awk '{print $1}')
-    [ -z "$PLAYERS" ] && PLAYERS=0
-
-    if [ "$PLAYERS" -eq 0 ]; then
-        FINAL_LIST="None online"
-    else
-        FINAL_LIST=$(sed '/^$/d' "$LIST_FILE" | tr -d '"' | paste -sd ',' - | sed 's/,/\\n/g')
-    fi
-
-    cat <<EOF > payload.json
-{
-  "username": "$BOT_NAME",
-  "avatar_url": "$BOT_LOGO",
-  "embeds": [{
-    "title": "🦖 Ark Ascended Live Server Status",
-    "color": 5763719,
-    "fields": [
-      {"name": "Server Name", "value": "$CLEAN_SNAME", "inline": false},
-      {"name": "Status", "value": "🟢 Online", "inline": true},
-      {"name": "Current Players", "value": "$PLAYERS", "inline": true},
-      {"name": "Online Players", "value": "\`\`\`\n$FINAL_LIST\n\`\`\`", "inline": false}
-    ],
-    "footer": {"text": "Last Updated: $CUR_TIME | Skye Serve"}
-  }]
-}
-EOF
-
-    if [ ! -s "$MSG_ID_FILE" ]; then
-        RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" -d @payload.json "${DISCORD_WEBHOOK}?wait=true")
-        NEW_ID=$(echo "$RESPONSE" | grep -o '"id":"[0-9]*"' | head -n 1 | cut -d'"' -f4)
-        if [[ "$NEW_ID" =~ ^[0-9]+$ ]]; then echo "$NEW_ID" > "$MSG_ID_FILE"; fi
-    else
-        MESSAGE_ID=$(cat "$MSG_ID_FILE")
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Content-Type: application/json" -d @payload.json "${DISCORD_WEBHOOK}/messages/${MESSAGE_ID}")
-        
-        # Only delete the message ID if Discord explicitly says the message no longer exists (404)
-        if [ "$HTTP_CODE" == "404" ]; then 
-            rm -f "$MSG_ID_FILE"
-        fi
-    fi
-
-    # Run sleep in the background and wait to allow the 'trap' to instantly interrupt it
-    sleep 5 &
-    wait $!
-done
+        ONLINE
