@@ -18,6 +18,7 @@ done
 
 # CLEAN RESET
 rm -f "payload.json"
+rm -f "$MSG_ID_FILE"  # <--- Added this to prevent stuck IDs on reboot!
 > "$LIST_FILE" 
 touch "$MAP_FILE"
 
@@ -31,15 +32,18 @@ get_server_info() {
     GUS_INI="ShooterGame/Saved/Config/WindowsServer/GameUserSettings.ini"
     CLEAN_SNAME=""
     if [ -f "$GUS_INI" ]; then
-        CLEAN_SNAME=$(grep -m 1 -i "^SessionName=" "$GUS_INI" | cut -d'=' -f2 | tr -d '\r"\'')
+        # Pull the name, and use tr to violently strip quotes, carriage returns, and invisible characters
+        CLEAN_SNAME=$(grep -m 1 -i "^SessionName=" "$GUS_INI" | cut -d'=' -f2 | tr -d '\r' | tr -d '"' | tr -d "'" | tr -dc '[:print:]')
     fi
+    
     # If INI is missing or empty, fallback to Pterodactyl variables
     [ -z "$CLEAN_SNAME" ] && CLEAN_SNAME="${SESSION_NAME:-${SERVER_NAME:-ASA Server}}"
+    
+    # Strip variables just to be safe
+    CLEAN_SNAME=$(echo "$CLEAN_SNAME" | tr -d '"' | tr -d "'" | tr -dc '[:print:]')
 
     # 2. Extract Map from Pterodactyl Variables
     CLEAN_MAP="${SERVER_MAP:-Unknown Map}"
-    
-    # Automatically strip the "_WP" suffix from ANY map name
     CLEAN_MAP="${CLEAN_MAP%_WP}"
     
     # Inject spaces into names that are squished together
