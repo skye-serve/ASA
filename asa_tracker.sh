@@ -24,16 +24,42 @@ touch "$MAP_FILE"
 echo "--- Stable ASA Tracker Started: $(date) ---" > tracker_debug.log
 
 # ========================================================
-# --- DATA EXTRACTION ---
-# Pterodactyl passes these from your Variables tab. 
-# We check the most common variable names used in ASA eggs.
+# --- INFO EXTRACTOR ---
 # ========================================================
 get_server_info() {
-    # Find Server Name (Checks SESSION_NAME first, then SERVER_NAME)
-    CLEAN_SNAME=$(echo "${SESSION_NAME:-${SERVER_NAME:-ASA Server}}" | tr -d '"' | tr -dc '[:print:]')
+    # 1. Extract accurate Server Name directly from the GameUserSettings.ini
+    GUS_INI="ShooterGame/Saved/Config/WindowsServer/GameUserSettings.ini"
+    CLEAN_SNAME=""
+    if [ -f "$GUS_INI" ]; then
+        CLEAN_SNAME=$(grep -m 1 -i "^SessionName=" "$GUS_INI" | cut -d'=' -f2 | tr -d '\r"\'')
+    fi
+    # If INI is missing or empty, fallback to Pterodactyl variables
+    [ -z "$CLEAN_SNAME" ] && CLEAN_SNAME="${SESSION_NAME:-${SERVER_NAME:-ASA Server}}"
+
+    # 2. Extract Map from Pterodactyl Variables
+    CLEAN_MAP="${SERVER_MAP:-Unknown Map}"
     
-    # Find Map Name (Checks SERVER_MAP first, then MAP)
-    CLEAN_MAP=$(echo "${SERVER_MAP:-${MAP:-TheIsland_WP}}" | tr -d '"' | tr -dc '[:print:]')
+    # Automatically strip the "_WP" suffix from ANY map name
+    CLEAN_MAP="${CLEAN_MAP%_WP}"
+    
+    # Inject spaces into names that are squished together
+    case "$CLEAN_MAP" in
+        "TheIsland") CLEAN_MAP="The Island" ;;
+        "ScorchedEarth") CLEAN_MAP="Scorched Earth" ;;
+        "TheCenter") CLEAN_MAP="The Center" ;;
+        "BobsMissions") CLEAN_MAP="Bob's Missions" ;;
+        "LostColony") CLEAN_MAP="Lost Colony" ;;
+        "TemptressLagoon") CLEAN_MAP="Temptress Lagoon" ;;
+        "ClubARK") CLEAN_MAP="Club ARK" ;;
+        "LostCity") CLEAN_MAP="Lost City" ;;
+        "EbenusAstrum") CLEAN_MAP="Ebenus Astrum" ;;
+        "TaeniaStella") CLEAN_MAP="Taenia Stella" ;;
+        "PrimalGround") CLEAN_MAP="Primal Ground" ;;
+        "BloodSands") CLEAN_MAP="Blood Sands" ;;
+        "NexoArkano") CLEAN_MAP="Nexo Arkano" ;;
+        "Nyxora_Eventmap") CLEAN_MAP="Nyxora Event Map" ;;
+        "WAK_TROPICAL") CLEAN_MAP="WAK Tropical" ;;
+    esac
 }
 
 # ========================================================
@@ -52,10 +78,9 @@ send_offline() {
     "title": "🦖 Ark Ascended Live Server Status",
     "color": 15548997, 
     "fields": [
-      {"name": "Server Name", "value": "$CLEAN_SNAME", "inline": false},
+      {"name": "Server Name", "value": "$CLEAN_SNAME", "inline": true},
       {"name": "Map", "value": "$CLEAN_MAP", "inline": true},
       {"name": "Status", "value": "🔴 Offline", "inline": true},
-      {"name": "Current Players", "value": "0", "inline": true},
       {"name": "Online Players", "value": "\`\`\`\nServer is currently offline\n\`\`\`", "inline": false}
     ],
     "footer": {"text": "Last Updated: $CUR_TIME | Skye Serve"}
@@ -69,14 +94,11 @@ EOF
     exit 0
 }
 
-# Trap Pterodactyl's Stop button
 trap send_offline SIGTERM SIGINT
 # ========================================================
 
 # --- Background Listener ---
 tail -F -n 0 "$LOG_FILE" 2>/dev/null | while read -r line; do
-
-    # Trigger #1: Player Joins
     if [[ "$line" == *"Join succeeded:"* ]]; then
         NAME=$(echo "$line" | sed 's/.*Join succeeded: //' | tr -d '\r\n' | tr -d '"' | tr -d "'" | xargs)
         if [ -n "$NAME" ] && ! grep -qx "$NAME" "$LIST_FILE"; then
@@ -84,11 +106,59 @@ tail -F -n 0 "$LOG_FILE" 2>/dev/null | while read -r line; do
         fi
     fi
 
-    # Trigger #2: Player Leaves
-    if [[ "$line" == *"CloseBunch"* ]] || [[ "$line" == *"LogNet: UChannel::Close"* ]]; then
-        if [[ "$line" == *"Account was disconnected"* ]]; then
-            LEAVE_ID=$(echo "$line" | sed -n 's/.*AccountId \([A-F0-9]*\)\..*/\1/p')
-        fi
+    if [[ "$line" == *"CloseBunch"* ]] || [[ "$line" == *"LogNet: UChannel::Close"* ]] || [[ "$line" == *"Account was disconnected"* ]]; then
+        ONLINE_COUNT=$(grep -c "[^[:space:]]" "$LIST_FILE")
+        if [ "$ONLINE_COUNT" -le 1 ]; then > "$LIST_FILE"; fi
+    fi
+done &
+
+# --- Main Discord Loop ---
+while true; do
+    CUR_TIME=$(date +'%T')
+    get_server_info
+
+    # NORMAL ONLINE LOOP
+    PLAYERS=$(grep -c "[^[:space:]]" "$LIST_FILE" | awk '{print $1}')
+    [ -z "$PLAYERS" ] && PLAYERS=0
+
+    if [ "$PLAYERS" -eq 0 ]; then
+        FINAL_LIST="None online"
+    else
+        FINAL_LIST=$(sed '/^$/d' "$LIST_FILE" | tr -d '"' | paste -sd ',' - | sed 's/,/\\n/g')
+    fi
+
+    cat <<EOF > payload.json
+{
+  "username": "$BOT_NAME",
+  "avatar_url": "$BOT_LOGO",
+  "embeds": [{
+    "title": "🦖 Ark Ascended Live Server Status",
+    "color": 5763719,
+    "fields": [
+      {"name": "Server Name", "value": "$CLEAN_SNAME", "inline": true},
+      {"name": "Map", "value": "$CLEAN_MAP", "inline": true},
+      {"name": "Status", "value": "🟢 Online", "inline": true},
+      {"name": "Current Players", "value": "$PLAYERS", "inline": true},
+      {"name": "Online Players", "value": "\`\`\`\n$FINAL_LIST\n\`\`\`", "inline": false}
+    ],
+    "footer": {"text": "Last Updated: $CUR_TIME | Skye Serve"}
+  }]
+}
+EOF
+
+    if [ ! -s "$MSG_ID_FILE" ]; then
+        RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" -d @payload.json "${DISCORD_WEBHOOK}?wait=true")
+        NEW_ID=$(echo "$RESPONSE" | grep -o '"id":"[0-9]*"' | head -n 1 | cut -d'"' -f4)
+        if [[ "$NEW_ID" =~ ^[0-9]+$ ]]; then echo "$NEW_ID" > "$MSG_ID_FILE"; fi
+    else
+        MESSAGE_ID=$(cat "$MSG_ID_FILE")
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Content-Type: application/json" -d @payload.json "${DISCORD_WEBHOOK}/messages/${MESSAGE_ID}")
         
-        # Fallback for generic disconnects: if we only have 1 player, clear the list
-        ONLINE
+        if [ "$HTTP_CODE" == "404" ]; then 
+            rm -f "$MSG_ID_FILE"
+        fi
+    fi
+
+    sleep 5 &
+    wait $!
+done
