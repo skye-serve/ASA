@@ -18,35 +18,25 @@ done
 
 # CLEAN RESET
 rm -f "payload.json"
-rm -f "$MSG_ID_FILE"  # <--- Added this to prevent stuck IDs on reboot!
+rm -f "$MSG_ID_FILE"
 > "$LIST_FILE" 
 touch "$MAP_FILE"
 
-echo "--- Stable ASA Tracker Started: $(date) ---" > tracker_debug.log
+echo "--- Unified ASA Tracker & Logger Started: $(date) ---" > tracker_debug.log
 
 # ========================================================
 # --- INFO EXTRACTOR ---
 # ========================================================
 get_server_info() {
-    # 1. Extract accurate Server Name directly from the GameUserSettings.ini
     GUS_INI="ShooterGame/Saved/Config/WindowsServer/GameUserSettings.ini"
     CLEAN_SNAME=""
     if [ -f "$GUS_INI" ]; then
-        # Pull the name, and use tr to violently strip quotes, carriage returns, and invisible characters
         CLEAN_SNAME=$(grep -m 1 -i "^SessionName=" "$GUS_INI" | cut -d'=' -f2 | tr -d '\r' | tr -d '"' | tr -d "'" | tr -dc '[:print:]')
     fi
-    
-    # If INI is missing or empty, fallback to Pterodactyl variables
     [ -z "$CLEAN_SNAME" ] && CLEAN_SNAME="${SESSION_NAME:-${SERVER_NAME:-ASA Server}}"
-    
-    # Strip variables just to be safe
     CLEAN_SNAME=$(echo "$CLEAN_SNAME" | tr -d '"' | tr -d "'" | tr -dc '[:print:]')
-
-    # 2. Extract Map from Pterodactyl Variables
     CLEAN_MAP="${SERVER_MAP:-Unknown Map}"
     CLEAN_MAP="${CLEAN_MAP%_WP}"
-    
-    # Inject spaces into names that are squished together
     case "$CLEAN_MAP" in
         "TheIsland") CLEAN_MAP="The Island" ;;
         "ScorchedEarth") CLEAN_MAP="Scorched Earth" ;;
@@ -73,7 +63,6 @@ send_offline() {
     echo "[SHUTDOWN] Kill signal received! Updating Discord..." >> tracker_debug.log
     CUR_TIME=$(date +'%T')
     get_server_info
-    
     cat <<EOF > payload.json
 {
   "username": "$BOT_NAME",
@@ -97,12 +86,14 @@ EOF
     fi
     exit 0
 }
-
 trap send_offline SIGTERM SIGINT
-# ========================================================
 
-# --- Background Listener ---
+# ========================================================
+# --- BACKGROUND LISTENER (Player Tracking + Event Logging) ---
+# ========================================================
 tail -F -n 0 "$LOG_FILE" 2>/dev/null | while read -r line; do
+    
+    # 1. Player Joins (Public Status)
     if [[ "$line" == *"Join succeeded:"* ]]; then
         NAME=$(echo "$line" | sed 's/.*Join succeeded: //' | tr -d '\r\n' | tr -d '"' | tr -d "'" | xargs)
         if [ -n "$NAME" ] && ! grep -qx "$NAME" "$LIST_FILE"; then
@@ -110,21 +101,47 @@ tail -F -n 0 "$LOG_FILE" 2>/dev/null | while read -r line; do
         fi
     fi
 
+    # 2. Player Leaves (Public Status)
     if [[ "$line" == *"CloseBunch"* ]] || [[ "$line" == *"LogNet: UChannel::Close"* ]] || [[ "$line" == *"Account was disconnected"* ]]; then
         ONLINE_COUNT=$(grep -c "[^[:space:]]" "$LIST_FILE")
         if [ "$ONLINE_COUNT" -le 1 ]; then > "$LIST_FILE"; fi
     fi
+
+    # 3. Admin Events (Only if LOG_WEBHOOK exists)
+    if [ -n "$LOG_WEBHOOK" ]; then
+        EVENT_MSG=""
+        ICON=""
+
+        if [[ "$line" == *"tamed a"* ]]; then
+            EVENT_MSG="🦖 TAME: $line"
+            ICON="🦖"
+        elif [[ "$line" == *"claimed a"* ]]; then
+            EVENT_MSG="🚩 CLAIM: $line"
+            ICON="🚩"
+        elif [[ "$line" == *"was born!"* ]] || [[ "$line" == *"hatched a"* ]]; then
+            EVENT_MSG="🍼 NEW BABY: $line"
+            ICON="🍼"
+        elif [[ "$line" == *"was killed by"* ]]; then
+            EVENT_MSG="💀 DEATH: $line"
+            ICON="☠️"
+        fi
+
+        if [ -n "$EVENT_MSG" ]; then
+            # Strip the log timestamp [2026.04.28...] for a clean Discord message
+            CLEAN_EVENT=$(echo "$EVENT_MSG" | sed 's/\[.*\] //')
+            curl -s -X POST -H "Content-Type: application/json" -d "{\"content\": \"$ICON **$CLEAN_EVENT**\"}" "$LOG_WEBHOOK"
+        fi
+    fi
 done &
 
-# --- Main Discord Loop ---
+# ========================================================
+# --- MAIN DISCORD LOOP (Server Status Embed) ---
+# ========================================================
 while true; do
     CUR_TIME=$(date +'%T')
     get_server_info
-
-    # NORMAL ONLINE LOOP
     PLAYERS=$(grep -c "[^[:space:]]" "$LIST_FILE" | awk '{print $1}')
     [ -z "$PLAYERS" ] && PLAYERS=0
-
     if [ "$PLAYERS" -eq 0 ]; then
         FINAL_LIST="None online"
     else
@@ -157,12 +174,8 @@ EOF
     else
         MESSAGE_ID=$(cat "$MSG_ID_FILE")
         HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Content-Type: application/json" -d @payload.json "${DISCORD_WEBHOOK}/messages/${MESSAGE_ID}")
-        
-        if [ "$HTTP_CODE" == "404" ]; then 
-            rm -f "$MSG_ID_FILE"
-        fi
+        if [ "$HTTP_CODE" == "404" ]; then rm -f "$MSG_ID_FILE"; fi
     fi
-
     sleep 5 &
     wait $!
 done
