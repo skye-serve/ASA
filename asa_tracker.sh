@@ -6,7 +6,7 @@ MSG_ID_FILE="discord_message_id.txt"
 LIST_FILE="current_players.tmp"
 MAP_FILE="asa_id_map.tmp"
 
-BOT_NAME="Skye Serve Monitor"
+BOT_NAME="Skye Serve ASA Monitor"
 BOT_LOGO="https://raw.githubusercontent.com/parkervcp/pterodactyl-images/master/logos/ark_survival_ascended.png"
 
 # --- GHOST KILLER ---
