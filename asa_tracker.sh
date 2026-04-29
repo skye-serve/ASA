@@ -7,7 +7,7 @@ LIST_FILE="current_players.tmp"
 MAP_FILE="asa_id_map.tmp"
 
 BOT_NAME="Skye Serve ASA Monitor"
-BOT_LOGO="https://raw.githubusercontent.com/parkervcp/pterodactyl-images/master/logos/ark_survival_ascended.png"
+BOT_LOGO="https://raw.githubusercontent.com/skye-serve/ASA/refs/heads/main/ARK%20VPS%20Category.jpg"
 
 # --- GHOST KILLER ---
 for pid in $(pgrep -f asa_tracker.sh); do
