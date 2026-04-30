@@ -18,7 +18,6 @@ done
 
 # CLEAN RESET
 rm -f "payload.json"
-rm -f "$MSG_ID_FILE"
 > "$LIST_FILE" 
 touch "$MAP_FILE"
 
