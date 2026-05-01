@@ -92,16 +92,26 @@ trap send_offline SIGTERM SIGINT
 # ========================================================
 tail -F -n 0 "$LOG_FILE" 2>/dev/null | while read -r line; do
     
-    # 1. Player Joins (Public Status)
-    if [[ "$line" == *"Join succeeded:"* ]]; then
-        NAME=$(echo "$line" | sed 's/.*Join succeeded: //' | tr -d '\r\n' | tr -d '"' | tr -d "'" | xargs)
+    # 1. Player Joins (Updated for ASA syntax)
+    if [[ "$line" == *"joined this ARK!"* ]]; then
+        # This isolates everything between ": " and " [UniqueNetId" to perfectly grab the name
+        NAME=$(echo "$line" | awk -F' \\[UniqueNetId' '{print $1}' | awk -F': ' '{print $NF}' | tr -d '\r\n' | tr -d '"' | tr -d "'" | xargs)
         if [ -n "$NAME" ] && ! grep -qx "$NAME" "$LIST_FILE"; then
             echo "$NAME" >> "$LIST_FILE"
         fi
     fi
 
-    # 2. Player Leaves (Public Status)
-    if [[ "$line" == *"CloseBunch"* ]] || [[ "$line" == *"LogNet: UChannel::Close"* ]] || [[ "$line" == *"Account was disconnected"* ]]; then
+    # 2. Player Leaves (Updated to target the specific player name!)
+    if [[ "$line" == *"left this ARK!"* ]]; then
+        NAME=$(echo "$line" | awk -F' \\[UniqueNetId' '{print $1}' | awk -F': ' '{print $NF}' | tr -d '\r\n' | tr -d '"' | tr -d "'" | xargs)
+        if [ -n "$NAME" ]; then
+            # Deletes only this specific player's name from the tracker list
+            sed -i "/^$NAME$/d" "$LIST_FILE"
+        fi
+    fi
+
+    # Fallback Wipe for hard crashes
+    if [[ "$line" == *"LogNet: UChannel::Close"* ]] || [[ "$line" == *"Account was disconnected"* ]]; then
         ONLINE_COUNT=$(grep -c "[^[:space:]]" "$LIST_FILE")
         if [ "$ONLINE_COUNT" -le 1 ]; then > "$LIST_FILE"; fi
     fi
@@ -126,7 +136,6 @@ tail -F -n 0 "$LOG_FILE" 2>/dev/null | while read -r line; do
         fi
 
         if [ -n "$EVENT_MSG" ]; then
-            # Strip the log timestamp [2026.04.28...] for a clean Discord message
             CLEAN_EVENT=$(echo "$EVENT_MSG" | sed 's/\[.*\] //')
             curl -s -X POST -H "Content-Type: application/json" -d "{\"content\": \"$ICON **$CLEAN_EVENT**\"}" "$LOG_WEBHOOK"
         fi
@@ -141,6 +150,7 @@ while true; do
     get_server_info
     PLAYERS=$(grep -c "[^[:space:]]" "$LIST_FILE" | awk '{print $1}')
     [ -z "$PLAYERS" ] && PLAYERS=0
+    
     if [ "$PLAYERS" -eq 0 ]; then
         FINAL_LIST="None online"
     else
