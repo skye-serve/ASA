@@ -154,7 +154,7 @@ tail -F -n 0 "$LOG_FILE" 2>/dev/null | while read -r line; do
             EVENT_MSG="**ADMIN COMMAND:** $EVENT_MSG"
             ICON="🚨"
         
-        # Catch Player Actions (Tames, Claims, Births, Deaths)
+        # Catch Player Actions (Tames, Claims, Births, Deaths, Cryos, Structures)
         elif [[ "$line" == *"tamed a"* ]]; then
             EVENT_MSG=$(echo "$line" | sed -E 's/.*(: |\])//')
             EVENT_MSG="TAME: $EVENT_MSG"
@@ -171,6 +171,14 @@ tail -F -n 0 "$LOG_FILE" 2>/dev/null | while read -r line; do
             EVENT_MSG=$(echo "$line" | sed -E 's/.*(: |\])//')
             EVENT_MSG="DEATH: $EVENT_MSG"
             ICON="☠️"
+        elif [[ "$line" == *"cryopod"* ]] || [[ "$line" == *"Cryopod"* ]]; then
+            EVENT_MSG=$(echo "$line" | sed -E 's/.*(: |\])//')
+            EVENT_MSG="CRYOPOD: $EVENT_MSG"
+            ICON="❄️"
+        elif [[ "$line" == *"destroyed a"* ]] || [[ "$line" == *"was destroyed"* ]]; then
+            EVENT_MSG=$(echo "$line" | sed -E 's/.*(: |\])//')
+            EVENT_MSG="STRUCTURE: $EVENT_MSG"
+            ICON="💥"
         fi
 
         # Push to Discord
@@ -227,5 +235,5 @@ EOF
         HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Content-Type: application/json" -d @payload.json "${DISCORD_WEBHOOK}/messages/${MESSAGE_ID}")
         if [ "$HTTP_CODE" == "404" ]; then rm -f "$MSG_ID_FILE"; fi
     fi
-    sleep 5
+    sleep 10
 done
