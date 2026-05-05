@@ -6,6 +6,12 @@ MSG_ID_FILE="discord_message_id.txt"
 LIST_FILE="current_players.tmp"
 MAP_FILE="asa_id_map.tmp"
 
+# --- WEBHOOKS ---
+# Pulling from Panel Environment Variables
+DISCORD_WEBHOOK="${DISCORD_WEBHOOK}"
+CHAT_WEBHOOK="${CHAT_WEBHOOK}"
+LOG_WEBHOOK="${LOG_WEBHOOK}"
+
 BOT_NAME="Skye Serve ASA Monitor"
 BOT_LOGO="https://raw.githubusercontent.com/skye-serve/ASA/refs/heads/main/ARK%20VPS%20Category.jpg"
 
@@ -21,7 +27,7 @@ rm -f "payload.json"
 > "$LIST_FILE" 
 touch "$MAP_FILE"
 
-echo "--- Unified ASA Tracker & Logger Started: $(date) ---" > tracker_debug.log
+echo "--- Unified ASA Tracker, Chat, & Logger Started: $(date) ---" > tracker_debug.log
 
 # ========================================================
 # --- INFO EXTRACTOR ---
@@ -88,56 +94,92 @@ EOF
 trap send_offline SIGTERM SIGINT
 
 # ========================================================
-# --- BACKGROUND LISTENER (Player Tracking + Event Logging) ---
+# --- BACKGROUND LISTENER (Player Tracking + Logs + Chat) ---
 # ========================================================
 tail -F -n 0 "$LOG_FILE" 2>/dev/null | while read -r line; do
+    # Strip carriage returns to prevent pipeline hanging
+    line="${line//$'\r'/}"
     
-    # 1. Player Joins (Updated for ASA syntax)
+    # ----------------------------------------------------
+    # 💬 1. CHAT RELAY LOGIC
+    # ----------------------------------------------------
+    if [[ "$line" == *"ServerChat: "* ]]; then
+        # Ignore Discord relayed messages to prevent loops
+        if [[ "$line" != *"[Discord]"* ]]; then
+            # Format: [Time]ServerChat: PlayerName: Message...
+            CHAT_RAW=$(echo "$line" | sed 's/.*ServerChat: //')
+            P_NAME=$(echo "$CHAT_RAW" | cut -d':' -f1 | xargs)
+            P_MSG=$(echo "$CHAT_RAW" | cut -d':' -f2- | xargs)
+
+            if [ -n "$P_NAME" ] && [ -n "$P_MSG" ] && [ -n "$CHAT_WEBHOOK" ]; then
+                curl -s --max-time 8 -X POST -H "Content-Type: application/json" \
+                -d "{\"username\": \"$P_NAME\", \"content\": \"$P_MSG\"}" \
+                "$CHAT_WEBHOOK"
+            fi
+        fi
+    fi
+
+    # ----------------------------------------------------
+    # 👥 2. PLAYER JOIN/LEAVE LOGIC
+    # ----------------------------------------------------
     if [[ "$line" == *"joined this ARK!"* ]]; then
-        # This isolates everything between ": " and " [UniqueNetId" to perfectly grab the name
         NAME=$(echo "$line" | awk -F' \\[UniqueNetId' '{print $1}' | awk -F': ' '{print $NF}' | tr -d '\r\n' | tr -d '"' | tr -d "'" | xargs)
         if [ -n "$NAME" ] && ! grep -qx "$NAME" "$LIST_FILE"; then
             echo "$NAME" >> "$LIST_FILE"
         fi
     fi
 
-    # 2. Player Leaves (Updated to target the specific player name!)
     if [[ "$line" == *"left this ARK!"* ]]; then
         NAME=$(echo "$line" | awk -F' \\[UniqueNetId' '{print $1}' | awk -F': ' '{print $NF}' | tr -d '\r\n' | tr -d '"' | tr -d "'" | xargs)
         if [ -n "$NAME" ]; then
-            # Deletes only this specific player's name from the tracker list
             sed -i "/^$NAME$/d" "$LIST_FILE"
         fi
     fi
 
-    # Fallback Wipe for hard crashes
     if [[ "$line" == *"LogNet: UChannel::Close"* ]] || [[ "$line" == *"Account was disconnected"* ]]; then
         ONLINE_COUNT=$(grep -c "[^[:space:]]" "$LIST_FILE")
         if [ "$ONLINE_COUNT" -le 1 ]; then > "$LIST_FILE"; fi
     fi
 
-    # 3. Admin Events (Only if LOG_WEBHOOK exists)
+    # ----------------------------------------------------
+    # 🛠️ 3. ADMIN & ACTION EVENTS LOGIC
+    # ----------------------------------------------------
     if [ -n "$LOG_WEBHOOK" ]; then
         EVENT_MSG=""
         ICON=""
 
-        if [[ "$line" == *"tamed a"* ]]; then
-            EVENT_MSG="🦖 TAME: $line"
-            ICON="🦖"
+        # Catch Admin Commands
+        if [[ "$line" == *"AdminCmd:"* ]]; then
+            EVENT_MSG=$(echo "$line" | sed 's/.*AdminCmd: //')
+            EVENT_MSG="**ADMIN COMMAND:** $EVENT_MSG"
+            ICON="🚨"
+        
+        # Catch Player Actions (Tames, Claims, Births, Deaths)
+        elif [[ "$line" == *"tamed a"* ]]; then
+            EVENT_MSG=$(echo "$line" | sed -E 's/.*(: |\])//')
+            EVENT_MSG="TAME: $EVENT_MSG"
+            ICON="🦕"
         elif [[ "$line" == *"claimed a"* ]]; then
-            EVENT_MSG="🚩 CLAIM: $line"
+            EVENT_MSG=$(echo "$line" | sed -E 's/.*(: |\])//')
+            EVENT_MSG="CLAIM: $EVENT_MSG"
             ICON="🚩"
         elif [[ "$line" == *"was born!"* ]] || [[ "$line" == *"hatched a"* ]]; then
-            EVENT_MSG="🍼 NEW BABY: $line"
+            EVENT_MSG=$(echo "$line" | sed -E 's/.*(: |\])//')
+            EVENT_MSG="NEW BABY: $EVENT_MSG"
             ICON="🍼"
-        elif [[ "$line" == *"was killed by"* ]]; then
-            EVENT_MSG="💀 DEATH: $line"
+        elif [[ "$line" == *"was killed by"* ]] || [[ "$line" == *"died!"* ]]; then
+            EVENT_MSG=$(echo "$line" | sed -E 's/.*(: |\])//')
+            EVENT_MSG="DEATH: $EVENT_MSG"
             ICON="☠️"
         fi
 
+        # Push to Discord
         if [ -n "$EVENT_MSG" ]; then
-            CLEAN_EVENT=$(echo "$EVENT_MSG" | sed 's/\[.*\] //')
-            curl -s -X POST -H "Content-Type: application/json" -d "{\"content\": \"$ICON **$CLEAN_EVENT**\"}" "$LOG_WEBHOOK"
+            # Clean off any lingering date/time prefixes for a clean Discord embed
+            CLEAN_EVENT=$(echo "$EVENT_MSG" | sed -E 's/\[[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9]{2}\.[0-9]{2}\.[0-9]{2}:[0-9]+\]\[[ ]*[0-9]+\]//g' | xargs)
+            
+            curl -s --max-time 5 -X POST -H "Content-Type: application/json" \
+            -d "{\"content\": \"$ICON $CLEAN_EVENT\"}" "$LOG_WEBHOOK"
         fi
     fi
 done &
@@ -185,6 +227,5 @@ EOF
         HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Content-Type: application/json" -d @payload.json "${DISCORD_WEBHOOK}/messages/${MESSAGE_ID}")
         if [ "$HTTP_CODE" == "404" ]; then rm -f "$MSG_ID_FILE"; fi
     fi
-    sleep 5 &
-    wait $!
+    sleep 5
 done
